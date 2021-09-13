@@ -1782,6 +1782,7 @@ class GraphProto:
 
     def set_params(self, params):
         """set params for graph"""
+
         self.params = params
 
     def extract_parameters(self, program, scope=None):
