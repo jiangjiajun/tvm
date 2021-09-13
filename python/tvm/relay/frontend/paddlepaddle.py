@@ -25,6 +25,7 @@ import tvm
 from tvm.ir import IRModule
 
 from .. import analysis
+from ..loops import while_loop
 from .. import expr as _expr
 from .. import function as _function
 from .. import ty as _ty
@@ -39,6 +40,83 @@ from .common import (
 )
 
 __all__ = ["from_paddle"]
+
+
+class ControlFlow:
+    """Control flow converter for PaddlePaddle."""
+
+    operators = [
+        "while",
+    ]
+
+    @classmethod
+    def convert_block(cls, graph, block):
+        for op in block.ops:
+            if op.type in ControlFlow.operators:
+                raise Exception("Nested Control Flow Not Support Yet.")
+            else:
+                convert_func = _convert_map[op.type]
+                convert_func(graph, op, block)
+
+    @classmethod
+    def convert(cls, graph, op, program):
+        func = getattr(cls, "convert_{}".format(op.type))
+        return func(graph, op, program)
+
+    @classmethod
+    def convert_while(cls, graph, op, program):
+        sub_block_id = op.attr("sub_block").id
+        sub_block = program.blocks[sub_block_id]
+        input_names = op.input("X")
+        output_names = op.output("Out")
+        cond_name = op.input("Condition")[0]
+
+        for name in output_names:
+            if name == cond_name:
+                continue
+            if name not in input_names:
+                raise Exception("Output '{}' not in inputs".format(name))
+        inputs = [graph.get_node(x) for x in op.input("X")]
+
+        sub_graph = GraphProto()
+        sub_graph.set_params(graph.get_params())
+        cond_var = _expr.var(cond_name, shape=[1], dtype="bool")
+        loop_vars = list()
+        loop_vars.append(cond_var)
+        for i, name in enumerate(op.input("X")):
+            a = graph.get_node(name)
+            shape = infer_shape(graph.get_node(name))
+            dtype = program.blocks[0].var(name).dtype
+            dtype = str(dtype).strip().split(".")[1]
+            var = _expr.var(name, shape=shape, dtype=dtype)
+            loop_vars.append(var)
+
+        def cond_fn(*loop_inputs):
+            squeezed_cond = _op.squeeze(loop_inputs[0])
+            return _op.equal(squeezed_cond, _expr.const(True, "bool"))
+            true_const = _expr.const(np.array([True]), "bool")
+            out = _op.equal(loop_inputs[0], true_const)
+            return _op.squeeze(out)
+
+        def body_fn(*loop_inputs):
+            cond = loop_inputs[0]
+            body_inputs = loop_inputs[1:]
+            for ipt in body_inputs:
+                sub_graph.add_node(ipt.name_hint, ipt)
+            cls.convert_block(sub_graph, sub_block)
+            sub_outputs = [sub_graph.get_node(cond_name)]
+            sub_outputs += [sub_graph.get_node(name) for name in input_names]
+            return sub_outputs
+
+        loop = while_loop(cond_fn, loop_vars, body_fn)
+
+        init_cond = graph.get_node(op.input("Condition")[0])
+        init_inputs = [graph.get_node(x) for x in op.input("X")]
+        init_loop_vars = init_inputs
+
+        loop_vals = loop(init_cond, *init_loop_vars)
+        for i, name in enumerate(input_names):
+            graph.add_node(name, _expr.TupleGetItem(loop_vals, i + 1))
 
 
 def _get_pad_size(in_size, dilated_kernel_size, stride_size):
@@ -499,8 +577,8 @@ def convert_elementwise_op(g, op, block):
     op_func = op_map[op.type]
     ipt0 = g.get_node(op.input("X")[0])
     ipt1 = g.get_node(op.input("Y")[0])
-    ipt0_shape = block.var(op.input("X")[0]).shape
-    ipt1_shape = block.var(op.input("Y")[0]).shape
+    ipt0_shape = infer_shape(ipt0)
+    ipt1_shape = infer_shape(ipt1)
     axis = op.attr("axis")
     if len(ipt0_shape) != len(ipt1_shape):
         if axis < 0:
@@ -579,10 +657,10 @@ def convert_fill_constant(g, op, block):
     dtype = block.var(op.output("Out")[0]).dtype
     dtype = str(dtype).strip().split(".")[1]
     value = _expr.const(value).astype(dtype)
-    if op.input("ValueTensor"):
+    if "ValueTensor" in op.input_names and op.input("ValueTensor"):
         shape = g.get_node(op.input("ValueTensor")[0])
         shape = _infer_value(shape, g.get_params())
-    if op.input("ShapeTensor"):
+    if "ShapeTensor" in op.input_names and op.input("ShapeTensor"):
         shape = g.get_node(op.input("ShapeTensor")[0])
         shape = _infer_value(shape, g.get_params())
 
@@ -766,7 +844,7 @@ def convert_lookup_table(g, op, block):
     padding_idx = op.attr("padding_idx")
     if padding_idx != -1:
         g.get_params[op.input("W")[0]][padding_idx] = 0.0
-        g.add_node(op.input("W")[0], _expr.const(g.params[op.input("W")[0]]))
+        g.add_node(op.input("W")[0], _expr.const(g.get_params(op.input("W")[0])))
     weights = g.get_node(op.input("W")[0])
     out = _op.take(weights, indices.astype("int32"), axis=0)
     g.add_node(op.output("Out")[0], out)
@@ -1349,60 +1427,72 @@ def convert_slice(g, op, block):
 
     data = g.get_node(op.input("Input")[0])
     dims = len(infer_shape(data))
-    dtype = "int64"
 
     axes = op.attr("axes")
-    axes = _op.const(axes)
+    indices = _expr.const(axes).astype("int64")
+
     decrease_axis = op.attr("decrease_axis")
     if isinstance(decrease_axis, int):
         decrease_axis = [decrease_axis]
 
-    starts = op.input("StartsTensor")
-    if starts:
-        starts = g.get_node(starts[0])
+    if op.input("StartsTensor"):
+        starts = g.get_node(op.input("StartsTensor")[0])
+        starts = _infer_value(starts, g.get_params())
     elif op.input("StartsTensorList"):
         starts = []
         for start_index in op.input("StartsTensorList"):
-            start_index = g.get_node(start_index)
-            if not isinstance(start_index, _expr.Expr):
-                start_index = _expr.const(start_index, dtype=dtype)
-            else:
-                start_index = start_index.astype(dtype)
+            start_index = g.get_node(start_index).astype("int64")
             starts.append(start_index)
         starts = _op.concatenate(starts, axis=0)
+        starts = _infer_value(starts, g.get_params())
     else:
         starts = op.attr("starts")
-        starts = _expr.const(starts)
-    start_dtype = infer_type(starts).checked_type.dtype
-    if isinstance(starts, _expr.Expr):
-        starts = _op.scatter(
-            _op.const([0] * dims, dtype=start_dtype),
-            axes,
-            starts,
-            axis=0,
-        )
 
-    ends = op.input("EndsTensor")
-    if ends:
-        ends = g.get_node(ends[0])
+    if len(axes) < dims:
+        if isinstance(starts, _expr.Expr):
+            starts = _op.scatter(
+                _op.const([0] * dims, dtype=infer_type(starts).checked_type.dtype),
+                indices,
+                starts,
+                axis=0,
+            )
+        else:
+            base = [0] * dims
+            for i, axis in enumerate(axes):
+                base[axis] = starts[i]
+            starts = base
+
+    if op.input("EndsTensor"):
+        ends = g.get_node(op.input("EndsTensor")[0])
+        ends = _infer_value(ends)
     elif op.input("EndsTensorList"):
         ends = []
         for end_index in op.input("EndsTensorList"):
-            end_index = g.get_node(end_index)
-            if not isinstance(end_index, _expr.Expr):
-                end_index = _expr.const(end_index, dtype=dtype)
-            else:
-                end_index = end_index.astype(dtype)
+            end_index = g.get_node(end_index).astype("int64")
             ends.append(end_index)
         ends = _op.concatenate(ends, axis=0)
+        ends = _infer_value(ends, g.get_params())
     else:
         ends = op.attr("ends")
-        ends = _expr.const(ends)
-    if isinstance(ends, _expr.Expr):
-        data_shape = shape_of(data, infer_type(ends).checked_type.dtype)
-        ends = _op.scatter(data_shape, axes, ends, axis=0)
 
-    strides = _op.const([1] * dims, dtype=start_dtype)
+    if len(axes) < dims:
+        if isinstance(ends, _expr.Expr):
+            ends = _op.scatter(
+                _expr.const(
+                    np.array([np.iinfo(np.int32).max] * dims),
+                    dtype=infer_type(ends).checked_type.dtype,
+                ),
+                indices,
+                ends,
+                axis=0,
+            )
+        else:
+            base = [np.iinfo(np.int32).max] * dims
+            for i, axis in enumerate(axes):
+                base[axis] = ends[i]
+            ends = base
+
+    strides = _op.const([1] * dims, dtype="int64")
     out = _op.strided_slice(data, begin=starts, end=ends, strides=strides)
     if decrease_axis:
         out = _op.squeeze(out, axis=decrease_axis)
@@ -1693,6 +1783,10 @@ class GraphProto:
         assert name in self.params
         return self.params[name]
 
+    def set_params(self, params):
+        """set params for graph"""
+        self.params = params
+
     def extract_parameters(self, program, scope=None):
         """Extract all the weights from PaddlePaddle program."""
 
@@ -1731,6 +1825,8 @@ class GraphProto:
             for op in block.ops:
                 if op.type == "fetch":
                     continue
+                if op.type in ControlFlow.operators:
+                    continue
                 if op.type not in _convert_map:
                     unsupported_ops.add(op.type)
         if len(unsupported_ops) > 0:
@@ -1748,8 +1844,11 @@ class GraphProto:
             for op in block.ops:
                 if op.type == "fetch":
                     continue
-                convert_func = _convert_map[op.type]
-                convert_func(self, op, block)
+                if op.type in ControlFlow.operators:
+                    ControlFlow.convert(self, op, program)
+                else:
+                    convert_func = _convert_map[op.type]
+                    convert_func(self, op, block)
 
     def from_program(self, program, shape_dict, scope):
         """Construct the TVM relay expression from PaddlePaddle program."""
@@ -1769,7 +1868,7 @@ class GraphProto:
                 if op.type == "fetch":
                     output_names.append(op.input("X")[0])
 
-        outputs = [self.nodes[name] for name in output_names]
+        outputs = [self.get_node(name) for name in output_names]
         outputs = outputs[0] if len(outputs) == 1 else _expr.Tuple(outputs)
 
         free_vars = analysis.free_vars(outputs)
@@ -1793,7 +1892,7 @@ class GraphProto:
 
         output_names = [x.name for x in layer._output_spec()]
 
-        outputs = [self.nodes[name] for name in output_names]
+        outputs = [self.get_node(name) for name in output_names]
         outputs = outputs[0] if len(outputs) == 1 else _expr.Tuple(outputs)
 
         free_vars = analysis.free_vars(outputs)

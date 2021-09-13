@@ -77,7 +77,7 @@ def get_tvm_output(mod, params, target, device, input_data, compiled_names, num)
     return outputs
 
 
-def verify_model(func, input_data, rtol=1e-5, atol=1e-5, input_shape=None):
+def verify_model(func, input_data, rtol=1e-5, atol=1e-5, input_shape=None, use_vm=False):
     if not (isinstance(input_data, (tuple, list))):
         input_data = [input_data]
 
@@ -117,7 +117,7 @@ def verify_model(func, input_data, rtol=1e-5, atol=1e-5, input_shape=None):
 
     with tvm.transform.PassContext(opt_level=3):
         for target, dev in tvm.testing.enabled_targets():
-            if input_shape:
+            if input_shape or use_vm:
                 tvm_output = get_tvm_output_with_vm(mod, params, target, dev, compiled_input)
             else:
                 tvm_output = get_tvm_output(
@@ -1423,6 +1423,38 @@ def test_forward_tile():
 
 
 @tvm.testing.uses_gpu
+def test_forward_while():
+    class While1(paddle.nn.Layer):
+        def __init__(self):
+            super(While1, self).__init__()
+
+        def forward(self, x):
+            s = paddle.shape(x)
+            i = paddle.slice(s, axes=[0], starts=[0], ends=[1])
+            y = paddle.to_tensor(np.array([5]).astype("int32"))
+            while i < y:
+                i *= np.array([3], dtype="int32")
+            return i
+
+    class While2(paddle.nn.Layer):
+        def __init__(self):
+            super(While2, self).__init__()
+
+        def forward(self, x):
+            s = paddle.shape(x)
+            i = paddle.slice(s, axes=[0], starts=[0], ends=[1])
+            y = paddle.to_tensor(np.array([5]).astype("int32"))
+            while i < y:
+                i *= np.array([3], dtype="int32")
+            return i
+
+    input_data1 = paddle.rand([1, 3, 224, 224], dtype="float32")
+    verify_model(While1(), input_data=[input_data1], use_vm=True)
+    input_data2 = paddle.rand([3, 3], dtype="float32")
+    verify_model(While2(), input_data=[input_data2], use_vm=True)
+
+
+@tvm.testing.uses_gpu
 def test_forward_zeros():
     @paddle.jit.to_static
     def zeros1(inputs):
@@ -1494,3 +1526,4 @@ if __name__ == "__main__":
     test_forward_conv_transpose()
     test_forward_unary_op()
     test_forward_zeros()
+    test_forward_while()
