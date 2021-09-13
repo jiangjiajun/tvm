@@ -94,9 +94,6 @@ class ControlFlow:
         def cond_fn(*loop_inputs):
             squeezed_cond = _op.squeeze(loop_inputs[0])
             return _op.equal(squeezed_cond, _expr.const(True, "bool"))
-            true_const = _expr.const(np.array([True]), "bool")
-            out = _op.equal(loop_inputs[0], true_const)
-            return _op.squeeze(out)
 
         def body_fn(*loop_inputs):
             cond = loop_inputs[0]
