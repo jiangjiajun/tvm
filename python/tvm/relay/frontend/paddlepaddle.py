@@ -52,6 +52,7 @@ class ControlFlow:
     @classmethod
     def convert_block(cls, graph, block):
         for op in block.ops:
+            print("---", op.type)
             if op.type in ControlFlow.operators:
                 raise Exception("Nested Control Flow Not Support Yet.")
             else:
@@ -79,6 +80,7 @@ class ControlFlow:
         inputs = [graph.get_node(x) for x in op.input("X")]
 
         sub_graph = GraphProto()
+        sub_graph.shape_dict = graph.shape_dict
         sub_graph.set_params(graph.get_params())
         cond_var = _expr.var(cond_name, shape=[1], dtype="bool")
         loop_vars = list()
@@ -88,7 +90,11 @@ class ControlFlow:
             shape = infer_shape(graph.get_node(name))
             dtype = program.blocks[0].var(name).dtype
             dtype = str(dtype).strip().split(".")[1]
-            var = _expr.var(name, shape=shape, dtype=dtype)
+            try:
+                value = infer_value(a, g.get_params())
+                var = _expr.const(value)
+            except:
+                var = _expr.var(name, shape=shape, dtype=dtype)
             loop_vars.append(var)
 
         def cond_fn(*loop_inputs):
@@ -147,12 +153,41 @@ def _infer_value(x, params):
     try:
         if isinstance(x, _expr.Constant):
             return x.data.numpy().tolist()
-        return params[x.name_hint].numpy().tolist()
     except (IndexError, KeyError, AttributeError):
         try:
-            return infer_value(x, params).numpy().tolist()
+            value = infer_value(x, params).numpy()
+            x = _expr.const(value)
+            return value.tolist()
         except Exception:
             return x
+
+
+def _dtype_shape_promotion(inputs):
+    """Get promoted data type for list of tensors."""
+
+    dtype_order = ["bool", "int8", "int16", "int32", "int64", "float32", "float64"]
+#    dtypes = list()
+#    for i, x in enumerate(inputs):
+#        dtype = infer_type(x).checked_type.dtype
+#        dtype = dtype_order.index(dtype)
+#        dtypes.append(dtype)
+#    dtypes = set(dtypes)
+
+    ranks = [len(infer_shape(x)) for x in inputs]
+    if set(ranks) == set([1, 0]):
+        for i, r in enumerate(ranks):
+            if r == 0:
+                inputs[i] = _op.expand_dims(inputs[i], axis=0)
+
+    dtypes = set([dtype_order.index(infer_type(x).checked_type.dtype) for x in inputs])
+    if len(dtypes) == 1:
+        return inputs
+    max_dtype = dtype_order(max(dtypes))
+    for i in range(len(inputs)):
+        if infer_type(inputs[i]).checked_type.dtype != max_dtype:
+            inputs[i] = inputs[i].astype(max_dtype)
+
+    return inputs
 
 
 def convert_unary_op(g, op, block):
@@ -393,6 +428,8 @@ def convert_concat(g, op, block):
 
     inputs = [g.get_node(op.input("X")[i]) for i in range(len(op.input("X")))]
     axis = op.attr("axis")
+    print("=======concat shape", [infer_shape(x) for x in inputs])
+    inputs = _dtype_shape_promotion(inputs)
     out = _op.concatenate(inputs, axis=axis)
     g.add_node(op.output("Out")[0], out)
 
@@ -656,10 +693,11 @@ def convert_fill_constant(g, op, block):
     value = _expr.const(value).astype(dtype)
     if "ValueTensor" in op.input_names and op.input("ValueTensor"):
         shape = g.get_node(op.input("ValueTensor")[0])
-        shape = _infer_value(shape, g.get_params())
+        shape = g.infer_value(shape)
     if "ShapeTensor" in op.input_names and op.input("ShapeTensor"):
         shape = g.get_node(op.input("ShapeTensor")[0])
-        shape = _infer_value(shape, g.get_params())
+        shape = g.infer_value(shape)
+    #    shape = _infer_value(shape, g.get_params())
 
     out = _op.full(value, shape=shape, dtype=dtype)
     g.add_node(op.output("Out")[0], out)
@@ -813,12 +851,10 @@ def convert_layer_norm(g, op, block):
         bias = g.get_node(bias_input[0])
     else:
         bias = _expr.const(np.zeros(x_shape[begin_norm_axis]))
-
     if scale_input:
         scale = g.get_node(scale_input[0])
     else:
         scale = _expr.const(np.ones(x_shape[begin_norm_axis]))
-
     out = _op.nn.layer_norm(
         x, gamma=scale, beta=bias, axis=begin_norm_axis, epsilon=epsilon, center=True, scale=True
     )
@@ -839,10 +875,19 @@ def convert_lookup_table(g, op, block):
 
     indices = g.get_node(op.input("Ids")[0])
     padding_idx = op.attr("padding_idx")
-    if padding_idx != -1:
-        g.get_params[op.input("W")[0]][padding_idx] = 0.0
-        g.add_node(op.input("W")[0], _expr.const(g.get_params(op.input("W")[0])))
     weights = g.get_node(op.input("W")[0])
+    if padding_idx != -1:
+        if op.input("W")[0] in g.get_params():
+            weights = g.get_params(op.input("W")[0])
+            weights[padding_idx] = 0.0
+            weights = _expr.const(weights)
+        else:
+            shape = _infer_value(shape_of(weights), g.get_params())
+            assert not isinstance(shape, _expr.Expr), "Shape of weight has to be fixed for PaddlePaddle's lookup_table"
+            filters = np.ones(shape).astype(infer_type(weights).checked_type.dtype)
+            filters[padding_idx] = 0.0
+            filters = _expr.const(filters)
+            weights = weights * filters
     out = _op.take(weights, indices.astype("int32"), axis=0)
     g.add_node(op.output("Out")[0], out)
 
@@ -1179,10 +1224,12 @@ def convert_range(g, op, block):
     params = []
     for param in (start, stop, step):
         param = _infer_value(param, g.get_params())
+        if isinstance(param, list):
+            param = param[0]
         if isinstance(param, _expr.Expr):
             param = _op.squeeze(param)
         else:
-            param = _op.const(param[0], dtype=dtype)
+            param = _op.const(param, dtype=dtype)
         params.append(param)
 
     out = _op.transform.arange(params[0], params[1], params[2], dtype=dtype)
@@ -1231,18 +1278,14 @@ def convert_reshape(g, op, block):
     if input_shape:
         new_shape = g.get_node(input_shape[0])
     elif input_shape_tensor:
-        tmp_shape = []
+        new_shape = []
         for shape_name in input_shape_tensor:
             shape = g.get_node(shape_name)
             if len(infer_shape(shape)) == 0:
                 shape = _op.reshape(shape, [-1])
-            if isinstance(shape, _expr.Constant):
-                tmp_shape.append(shape)
-            elif isinstance(shape, _expr.Expr):
-                tmp_shape.append(shape)
-            else:
-                tmp_shape.append(_expr.const(np.array(shape).astype("int64")))
-        new_shape = _op.concatenate(tmp_shape, axis=0)
+            new_shape.append(shape.astype("int64")) 
+        new_shape = _op.concatenate(new_shape, axis=0)
+        new_shape = _infer_value(new_shape, g.get_params())
     else:
         new_shape = op.attr("shape")
     out = _op.reshape(data, new_shape)
@@ -1392,9 +1435,12 @@ def convert_scale(g, op, block):
     bias = op.attr("bias")
     bias_after_scale = op.attr("bias_after_scale")
     x = g.get_node(op.input("X")[0])
+    x_dtype = infer_type(x).checked_type.dtype
     if np.isclose(scale, 1.0) and np.isclose(bias, 0.0):
         out = x
     else:
+        if x_dtype != "float32":
+            x = x.astype("float32")
         if np.isclose(bias, 0.0):
             out = x * _expr.const(np.array(scale).astype("float32"))
         elif np.isclose(scale, 1.0):
@@ -1408,6 +1454,7 @@ def convert_scale(g, op, block):
                 out = (x + _expr.const(np.array(bias).astype("float32"))) * _expr.const(
                     np.array(scale).astype("float32")
                 )
+            out = out.astype(x_dtype)
     g.add_node(op.output("Out")[0], out)
 
 
@@ -1415,7 +1462,7 @@ def convert_shape(g, op, block):
     """Operator converter for shape."""
 
     x = g.get_node(op.input("Input")[0])
-    out = _op.shape_of(x)
+    out = shape_of(x)
     g.add_node(op.output("Out")[0], out)
 
 
@@ -1491,6 +1538,10 @@ def convert_slice(g, op, block):
 
     strides = _op.const([1] * dims, dtype="int64")
     out = _op.strided_slice(data, begin=starts, end=ends, strides=strides)
+    if op.output("Out")[0] == "shape_1.tmp_0_slice_0":
+        print("Start to infer slice value")
+        print(_infer_value(out, g.get_params()))
+        print("end to infer slice value")
     if decrease_axis:
         out = _op.squeeze(out, axis=decrease_axis)
     g.add_node(op.output("Out")[0], out)
@@ -1580,7 +1631,7 @@ def convert_topk(g, op, block):
         k = _infer_value(k_node, g.get_params())
     else:
         k = op.attr("k")
-    outs = _op.topk(x, k=k, axis=axis, is_ascend=is_ascend, ret_type="both", dtype="int32")
+    outs = _op.topk(x, k=k, axis=axis, is_ascend=is_ascend, ret_type="both", dtype="int64")
 
     g.add_node(op.output("Out")[0], outs[0])
     g.add_node(op.output("Indices")[0], outs[1])
@@ -1589,10 +1640,11 @@ def convert_topk(g, op, block):
 def convert_stack(g, op, block):
     """Operator converter for stack."""
 
-    x = op.input("X")
-    x = [g.get_node(i) for i in x]
+    inputs = op.input("X")
+    inputs = [g.get_node(i) for i in inputs]
     axis = op.attr("axis")
-    out = _op.stack(x, axis)
+    inputs = _dtype_shape_promotion(inputs)
+    out = _op.stack(inputs, axis)
     g.add_node(op.output("Y")[0], out)
 
 
@@ -1769,6 +1821,7 @@ class GraphProto:
         """add a node to graph"""
         if self.shape_dict:
             self.nodes[name] = fold_constant(node)
+            tmp = infer_type(self.nodes[name]).checked_type.dtype
         else:
             self.nodes[name] = node
 
@@ -1784,6 +1837,27 @@ class GraphProto:
         """set params for graph"""
 
         self.params = params
+
+    def infer_value(self, x):
+        """Try running infer_value, and if successful, return the inferred value.
+        Otherwise, return input"""
+    
+        if self.shape_dict is not None:
+            value = infer_value(x, self.params).numpy()
+            x = _expr.const(value)
+            return value.tolist()
+        try:
+            if isinstance(x, _expr.Constant):
+                return x.data.numpy().tolist()
+            return params[x.name_hint].numpy().tolist()
+        except (IndexError, KeyError, AttributeError):
+            try:
+                value = infer_value(x, params).numpy()
+                x = _expr.const(value)
+                return value.tolist()
+            except Exception:
+                return x
+
 
     def extract_parameters(self, program, scope=None):
         """Extract all the weights from PaddlePaddle program."""
@@ -1840,6 +1914,7 @@ class GraphProto:
                 convert_feed(self, input_spec, None)
         for block in program.blocks:
             for op in block.ops:
+                print("===========", op.type)
                 if op.type == "fetch":
                     continue
                 if op.type in ControlFlow.operators:
