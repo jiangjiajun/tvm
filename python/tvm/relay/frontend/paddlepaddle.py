@@ -1296,6 +1296,81 @@ def convert_mul(g, op, block):
     g.add_node(op.output("Out")[0], out)
 
 
+def convert_multiclass_nms(g, op, block):
+    boxes = g.get_node(op.input('BBoxes')[0])
+    scores = g.get_node(op.input('Scores')[0])
+    assert len(infer_shape(boxes)) == 3 and len(infer_shape(scores)) == 3
+    try:
+        batch_size, num_boxes, num_cord = infer_value(shape_of(boxes), g.get_params()).numpy().tolist()
+        batch_size, num_classes, num_boxes = infer_value(shape_of(scores), g.get_params()).numpy().tolist()
+    except Exception:
+        msg = "Only support fixed shape for PaddlePaddle's multiclass_nms"
+        raise tvm.error.OpNotImplemented(msg)
+    assert batch_size == 1, "Only batch_size==1 is supported for PaddlePaddle's multiclass_nms"
+
+    nms_top_k = op.attr('nms_top_k')
+    normalized = op.attr('normalized')
+    background_label = op.attr('background_label')
+    keep_top_k = op.attr('keep_top_k')
+    nms_eta = op.attr('nms_eta')
+    nms_threshold = op.attr('nms_threshold')
+    score_threshold = op.attr('score_threshold')
+    assert normalized, "Only normalized==True is Supported for PaddlePaddle's multiclass_nms"
+
+    indices, num_total_boxes = _op.vision.all_class_non_max_suppression(
+        boxes,
+        scores,
+        max_output_boxes_per_class=nms_top_k,
+        iou_threshold=nms_threshold,
+        score_threshold=score_threshold)
+    num_total_boxes = _op.cast(num_total_boxes, dtype='int32')
+
+    num_indices, _ = infer_shape(indices)
+    if nms_top_k > 0 and nms_top_k * num_classes < num_indices:
+        indices = _op.strided_slice(
+            indices,
+            begin=[0, 0],
+            end=[batch_size * nms_top_k * num_classes, 3])
+        num_indices = nms_top_k * num_classes
+
+    filters = np.array([i for i in range(num_indices)]).astype('int32')
+    filters = filters.reshape((-1, 1))
+    filters = _expr.const(filters)
+    compare = _op.less(filters, num_total_boxes)
+    indices = indices * compare.astype('int64')
+
+    batch_boxid = _op.strided_slice(indices,
+                                    begin=[0, 0],
+                                    end=[num_indices, 3],
+                                    strides=[1, 2])
+    class_id = _op.strided_slice(indices, begin=[0, 1], end=[num_indices, 2])
+    batch_boxid = _op.transpose(batch_boxid, axes=[1, 0])
+
+    filter_boxes = _op.gather_nd(boxes, batch_boxid, 0)
+    new_indices = _op.transpose(indices, axes=[1, 0])
+    filter_scores = _op.gather_nd(scores, new_indices, 0)
+
+    compare = _op.reshape(compare, (-1, ))
+    filter_scores = filter_scores * compare.astype('float32')
+
+    if keep_top_k > 0 and keep_top_k < num_indices:
+        filter_scores, topk_idx = _op.topk(filter_scores,
+                                           k=keep_top_k,
+                                           ret_type='both',
+                                           is_ascend=False)
+        topk_idx = _op.reshape(topk_idx, [-1, keep_top_k])
+        filter_boxes = _op.gather_nd(filter_boxes, topk_idx)
+        class_id = _op.gather_nd(class_id, topk_idx)
+        num_total_boxes = _op.minimum(
+            num_total_boxes,
+            _expr.const(np.array([keep_top_k]).astype('int32')))
+    filter_scores = _op.reshape(filter_scores, (-1, 1))
+    class_id = _op.cast(class_id, dtype='float32')
+    out = _op.concatenate([class_id, filter_scores, filter_boxes], axis=1)
+    g.add_node(op.output('Out')[0], out)
+    g.add_node(op.output('NmsRoisNum')[0], num_total_boxes)
+
+
 def convert_numel(g, op, block):
     """Operator converter for numel."""
 
@@ -1958,6 +2033,100 @@ def convert_where(g, op, block):
     g.add_node(op.output("Out")[0], out)
 
 
+def convert_yolo_box(g, op, block):
+    """Operator converter for yolo_box."""
+
+    x = g.get_node(op.input('X')[0])
+    img_size = g.get_node(op.input('ImgSize')[0])
+    anchors = op.attr('anchors')
+    class_num = op.attr('class_num')
+    clip_bbox = op.attr('clip_bbox')
+    conf_thresh = op.attr('conf_thresh')
+    downsample_ratio = op.attr('downsample_ratio')
+    scale_x_y = op.attr('scale_x_y')
+
+    try:
+        n, c, h, w, = infer_value(shape_of(x), g.get_params()).numpy().tolist()
+    except:
+        msg = "Only support fixed shape of input for PaddlePaddle's yolo_box"
+        raise tvm.error.OpNotImplemented(msg)
+
+    assert h > 0 and w > 0, "Only support fixed shape of input for PaddlePaddle's yolo_box"
+    an_num = int(len(anchors) // 2)
+    bias_x_y = -0.5 * (scale_x_y - 1.)
+    input_h = downsample_ratio * h
+    input_w = downsample_ratio * w
+
+    x = _op.reshape(x, (n, an_num, 5 + class_num, h, w))
+    x = _op.transpose(x, (0, 1, 3, 4, 2))
+
+    pred_box_xy = _op.strided_slice(x,
+                                    begin=[0, 0, 0, 0, 0],
+                                    end=[n, an_num, h, w, 2])
+    grid_x = np.tile(np.arange(w).reshape((1, w)),
+                     (h, 1)).reshape(h, w, 1).astype('float32')
+    grid_y = np.tile(np.arange(h).reshape((h, 1)),
+                     (1, w)).reshape(w, h, 1).astype('float32')
+    pred_box_xy = _op.sigmoid(pred_box_xy) * _expr.const(
+        scale_x_y) + _expr.const(bias_x_y) + _expr.const(
+            np.concatenate([grid_x, grid_y], axis=-1))
+    pred_box_xy = pred_box_xy / _expr.const(
+        np.array([w, h]).astype('float32').reshape([2]))
+
+    anchors = [(anchors[i], anchors[i + 1]) for i in range(0, len(anchors), 2)]
+    anchors_s = np.array([(an_w / input_w, an_h / input_h)
+                          for an_w, an_h in anchors])
+    anchor_w = anchors_s[:, 0:1].reshape((1, an_num, 1, 1)).astype('float32')
+    anchor_h = anchors_s[:, 1:2].reshape((1, an_num, 1, 1)).astype('float32')
+    pred_box_wh = _op.strided_slice(x,
+                                    begin=[0, 0, 0, 0, 2],
+                                    end=[n, an_num, h, w, 4])
+    pred_box_wh = _op.exp(pred_box_wh) * _expr.const(
+        np.stack([anchor_w, anchor_h], axis=-1))
+
+    pred_conf = _op.strided_slice(x,
+                                  begin=[0, 0, 0, 0, 4],
+                                  end=[n, an_num, h, w, 5])
+    pred_conf = _op.sigmoid(pred_conf)
+    filters = _op.greater_equal(pred_conf, _expr.const(conf_thresh))
+    filters = _op.cast(filters, dtype='float32')
+    pred_conf = pred_conf * filters
+    pred_score = _op.strided_slice(x,
+                                   begin=[0, 0, 0, 0, 5],
+                                   end=[n, an_num, h, w, 5 + class_num])
+    pred_score = _op.sigmoid(pred_score) * pred_conf
+    pred_score = _op.reshape(pred_score, (n, -1, class_num))
+
+    filters = _op.cast(_op.greater(pred_conf, _expr.const(0.0)),
+                       dtype='float32')
+
+    center = pred_box_wh / _expr.const(2.0)
+    pred_box_xy_min = pred_box_xy - center
+    pred_box_xy_max = pred_box_xy + center
+    new_img_size = _op.reverse(img_size, axis=1)
+    new_img_size = _op.cast(new_img_size, dtype='float32')
+    wh_const = _op.concatenate([new_img_size, new_img_size], axis=-1)
+    pred_box = _op.concatenate([pred_box_xy_min, pred_box_xy_max], axis=-1)
+    pred_box = pred_box * filters
+    pred_box = _op.reshape(pred_box, (n, -1, 4))
+    pred_box = pred_box * wh_const
+
+    if clip_bbox:
+        n, b, _ = infer_shape(pred_box)
+        pred_box_xy_min = _op.strided_slice(pred_box,
+                                            begin=[0, 0, 0],
+                                            end=[n, b, 2])
+        pred_box_xy_max = _op.strided_slice(pred_box,
+                                            begin=[0, 0, 2],
+                                            end=[n, b, 4])
+        pred_box_xy_min = _op.clip(pred_box_xy_min, 0, np.inf)
+        max_w_h = _op.reshape(new_img_size - _expr.const(1.0), (n, 1, 2))
+        pred_box_xy_max = _op.minimum(pred_box_xy_max, max_w_h)
+        pred_box = _op.concatenate([pred_box_xy_min, pred_box_xy_max], axis=-1)
+    g.add_node(op.output('Boxes')[0], pred_box)
+    g.add_node(op.output('Scores')[0], pred_score)
+
+
 _convert_map = {
     "abs": convert_unary_op,
     "acos": convert_unary_op,
@@ -2047,6 +2216,7 @@ _convert_map = {
     "matmul": convert_matmul,
     "matmul_v2": convert_matmul,
     "mul": convert_mul,
+    "multiclass_nms3": convert_multiclass_nms,
     "nearest_interp_v2": convert_interpolate,
     "not_equal": convert_elementwise_op,
     "pool2d": convert_pool2d,
@@ -2089,6 +2259,7 @@ _convert_map = {
     "unsqueeze2": convert_unsqueeze,
     "where": convert_where,
     "where_index": convert_nonzero,
+    "yolo_box": convert_yolo_box,
 }
 
 
