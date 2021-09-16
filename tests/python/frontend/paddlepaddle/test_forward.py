@@ -840,11 +840,11 @@ def test_forward_gelu():
 def test_forward_group_norm():
     class GroupNorm(nn.Layer):
         def __init__(self):
-            super(GroupNorm).__init__()
+            super(GroupNorm, self).__init__()
             self.group_norm = paddle.nn.GroupNorm(num_channels=6, num_groups=6)
 
         def forward(self, inputs):
-            self.group_norm(inputs)
+            return self.group_norm(inputs)
 
     input_shape = [2, 6, 2, 2]
     x = paddle.rand(input_shape, dtype="float32")
