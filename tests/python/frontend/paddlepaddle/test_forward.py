@@ -839,16 +839,16 @@ def test_forward_gelu():
 @tvm.testing.uses_gpu
 def test_forward_group_norm():
     class GroupNorm(nn.Layer):
-        def __init__(self, channels, groups):
+        def __init__(self):
             super(GroupNorm).__init__()
-            self.group_norm = paddle.nn.GroupNorm(num_channels=channels, num_groups=groups)
+            self.group_norm = paddle.nn.GroupNorm(num_channels=6, num_groups=6)
 
         def forward(self, inputs):
             self.group_norm(inputs)
 
     input_shape = [2, 6, 2, 2]
     x = paddle.rand(input_shape, dtype="float32")
-    verify_model(GroupNorm(6, 6), x)
+    verify_model(GroupNorm(), x)
 
 
 @tvm.testing.uses_gpu
@@ -1698,7 +1698,7 @@ if __name__ == "__main__":
     test_forward_gather_nd()
     test_forward_gelu()
     test_forward_group_norm()
-    test_forward_hard_activation()
+    test_forward_activation_function()
     test_forward_index_select()
     test_forward_instance_norm()
     test_forward_interpolate()
