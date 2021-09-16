@@ -867,6 +867,7 @@ def convert_hard_swish(g, op, block):
     assert np.isclose(threshold, 6.0), "Only support threshold==6.0 for PaddlePaddle's hard_swish"
     x = g.get_node(op.input("X")[0])
     dtype = infer_type(x).checked_type.dtype
+
     out = _op.clip(x, -1 * offset, offset)
     out = out / _expr.const(threshold, dtype) + _expr.const(0.5, dtype)
     out = x * out
@@ -977,6 +978,28 @@ def convert_logical_op(g, op, block):
     ipt1 = g.get_node(op.input("Y")[0])
     op_func = get_relay_op(op.type)
     out = op_func(ipt0, ipt1)
+    g.add_node(op.output("Out")[0], out)
+
+
+def convert_logsigmoid(g, op, block):
+    """Operator converter for logsigmoid."""
+
+    x = g.get_node(op.input("X")[0])
+    out = _op.log(_op.tensor.sigmoid(x))
+    g.add_node(op.output("Out")[0], out)
+
+
+def convert_logsoftmax(g, op, block):
+    """Operator converter for logsoftmax."""
+    x = g.get_node(op.input("X")[0])
+    axis = op.attr("axis")
+    ndim = len(infer_shape(x))
+    if axis < 0:
+        axis += ndim
+    m = _op.max(x, [axis], keepdims=True)
+    e = _op.exp(x - m)
+    s = _op.sum(e, [axis], keepdims=True)
+    out = x - m - _op.log(s)
     g.add_node(op.output("Out")[0], out)
 
 
@@ -1882,9 +1905,12 @@ _convert_map = {
     "log1p": convert_log1p,
     "logical_and": convert_logical_op,
     "logical_or": convert_logical_op,
+    "logsigmoid": convert_logsigmoid,
+    "log_softmax": convert_logsoftmax,
     "logsumexp": convert_logsumexp,
     "matmul": convert_matmul,
     "matmul_v2": convert_matmul,
+    "maxout": convert_maxout,
     "mul": convert_mul,
     "nearest_interp_v2": convert_interpolate,
     "not_equal": convert_elementwise_op,

@@ -165,9 +165,7 @@ def test_forward_unary_op():
         "log1p",
         "numel",
         "reciprocal",
-        "relu",
         "rsqrt",
-        "sigmoid",
         "sin",
         "square",
         "tan",
@@ -853,7 +851,7 @@ def test_forward_group_norm():
 
 
 @tvm.testing.uses_gpu
-def test_forward_hard_activation():
+def test_forward_activation_function():
     class Activation(nn.Layer):
         def __init__(self, op_name):
             super(Activation, self).__init__()
@@ -869,11 +867,21 @@ def test_forward_hard_activation():
 
     input_shape = [1, 3, 10, 10]
     input_data = paddle.rand(input_shape, dtype="float32")
-    input_data_2 = paddle.randint(1, 100, input_shape, dtype="int32")
-    op_list = ["elu", "hardshrink", "hardsigmoid", "hardswish", "hardtanh"]
+    input_data_2 = paddle.rand(input_shape).astype("float16")
+    op_list = [
+        "elu",
+        "hardshrink",
+        "hardsigmoid",
+        "hardswish",
+        "hardtanh",
+        "log_sigmoid",
+        "log_softmax",
+        "relu",
+        "sigmoid",
+    ]
     for op_name in op_list:
         verify_model(Activation(op_name), input_data=input_data)
-        verify_model(Activation(op_name), input_data=input_data_2)
+        verify_model(Activation(op_name), input_data=input_data_2, rtol=1e-3, atol=1e-3)
 
 
 @tvm.testing.uses_gpu
