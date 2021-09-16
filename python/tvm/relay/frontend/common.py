@@ -524,8 +524,6 @@ def infer_value(input_val, params, mod=None):
     whose output shape depends on the value of a tensor.
     """
     # Check that all free variables have associated parameters.
-    for var in analysis.free_vars(input_val):
-        assert var.name_hint in params.keys(), "{} not params".format(var.name_hint)
     assert all(
         var.name_hint in params.keys() for var in analysis.free_vars(input_val)
     ), "All inputs to infer must be available in params."
