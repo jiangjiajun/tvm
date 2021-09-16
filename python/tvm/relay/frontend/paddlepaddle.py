@@ -1910,7 +1910,6 @@ _convert_map = {
     "logsumexp": convert_logsumexp,
     "matmul": convert_matmul,
     "matmul_v2": convert_matmul,
-    "maxout": convert_maxout,
     "mul": convert_mul,
     "nearest_interp_v2": convert_interpolate,
     "not_equal": convert_elementwise_op,

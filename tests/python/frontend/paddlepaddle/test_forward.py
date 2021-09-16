@@ -845,8 +845,8 @@ def test_forward_group_norm():
         def forward(self, inputs):
             self.group_norm(inputs)
 
-    x_data = np.random.random(size=(2, 6, 2, 2)).astype("float32")
-    x = paddle.to_tensor(x_data)
+    input_shape = [2, 6, 2, 2]
+    x = paddle.rand(input_shape, dtype="float32")
     verify_model(GroupNorm(6, 6), x)
 
 
