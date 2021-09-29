@@ -538,7 +538,7 @@ def convert_conv2d(g, op, block):
     elif padding_algorithm == "EXPLICIT":
         if len(paddings) == 2:
             paddings = [paddings[0], paddings[1], paddings[0], paddings[1]]
-        if len(paddings) == 4:
+        elif len(paddings) == 4:
             paddings = [paddings[0], paddings[2], paddings[1], paddings[3]]
     else:
         msg = 'Value {} in attribute "padding" of operator Conv is not "valid."'
@@ -590,7 +590,7 @@ def convert_conv2d_transpose(g, op, block):
     elif padding_algorithm == "EXPLICIT":
         if len(paddings) == 2:
             paddings = [paddings[0], paddings[1], paddings[0], paddings[1]]
-        if len(paddings) == 4:
+        elif len(paddings) == 4:
             paddings = [paddings[0], paddings[2], paddings[1], paddings[3]]
     else:
         msg = 'Value {} in attribute "padding" of operator Conv is not "valid."'
@@ -1404,7 +1404,7 @@ def convert_pool2d(g, op, block):
     elif padding_algorithm == "EXPLICIT":
         if len(paddings) == 2:
             paddings = [paddings[0], paddings[1], paddings[0], paddings[1]]
-        if len(paddings) == 4:
+        elif len(paddings) == 4:
             paddings = [paddings[0], paddings[2], paddings[1], paddings[3]]
     else:
         msg = 'Value {} in attribute "padding" of operator Pool2d is not "valid."'
