@@ -37,6 +37,7 @@ from .common import (
     infer_shape,
     infer_type,
     infer_value,
+    try_infer_value,
     new_var,
 )
 
@@ -759,12 +760,42 @@ def convert_expand(g, op, block):
 
     x = g.get_node(op.input("X")[0])
     if op.input("Shape"):
-        sizes = g.get_node(op.input("Shape")[0])
-        sizes = _infer_value(sizes, g.get_params())
+        new_shapes = g.get_node(op.input("Shape")[0])
+        new_shapes = _infer_value(new_shapes, g.get_params())
+    elif op.input("expand_shapes_tensor"):
+        new_shapes = []
+        is_dynamic = False
+        for shape in op.input("expand_shapes_tensor"):
+            shape = g.get_node(shape)
+            if isinstance(shape, _expr.Constant):
+                shape = shape.data.numpy().tolist()
+            elif isinstance(shape, _op.Expr):
+                shape, is_success = try_infer_value(shape)
+                if not is_success:
+                    is_dynamic = True
+            if isinstance(shape, (list, tuple)):
+                new_shapes.extend(shape)
+            else:
+                new_shapes.append(shape)
+        if is_dynamic:
+            new_shapes = _op.concatenate(new_shapes, axis=0)
     else:
-        sizes = op.attr("shape")
+        new_shapes = op.attr("shape")
 
-    out = _op.broadcast_to(x, sizes)
+    if isinstance(new_shapes, (list, tuple)):
+        input_shape = infer_shape(x)
+        in_dims = len(input_shape)
+        new_dims = len(new_shapes)
+        assert new_dims >= in_dims, "The characteristics of expand_v2 in PADDLE change"
+        diff = new_dims - in_dims
+        for i, shape in enumerate(new_shapes):
+            if shape == -1:
+                if i < diff:
+                    new_shapes[i] = 1
+                else:
+                    new_shapes[i] = input_shape[i - diff]
+
+    out = _op.broadcast_to(x, new_shapes)
     g.add_node(op.output("Out")[0], out)
 
 
@@ -2528,6 +2559,7 @@ _convert_map = {
     "tan": convert_unary_op,
     "tanh": convert_unary_op,
     "tanh_shrink": convert_tanhshrink,
+    # "tensor_array_to_tensor": convert_tensor_array_to_tensor,
     "thresholded_relu": convert_thresholded_relu,
     "top_k_v2": convert_topk,
     "tile": convert_tile,
