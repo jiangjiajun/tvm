@@ -703,12 +703,19 @@ def test_forward_pool2d():
     def pool2d3(inputs):
         return nn.functional.max_pool2d(
             inputs, kernel_size=2, stride=2, padding=0, return_mask=True
+        )[0]
+
+    @paddle.jit.to_static
+    def pool2d4(inputs):
+        return nn.functional.avg_pool2d(
+            inputs, kernel_size=3, stride=1, padding=[1, 1], exclusive=False, divisor_override=2.5
         )
 
     input_data = paddle.uniform(shape=[1, 2, 32, 32], dtype="float32", min=-1, max=1)
     verify_model(pool2d1, input_data=input_data)
     verify_model(pool2d2, input_data=input_data)
-    # verify_model(pool2d3, input_data=input_data)
+    verify_model(pool2d3, input_data=input_data)
+    verify_model(pool2d4, input_data=input_data)
 
 
 @tvm.testing.uses_gpu
