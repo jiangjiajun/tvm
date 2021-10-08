@@ -166,14 +166,10 @@ def _infer_value(x, params):
     Otherwise, return input"""
 
     try:
-        if isinstance(x, _expr.Constant):
-            return x.data.numpy().tolist()
-        return params[x.name_hint].numpy().tolist()
-    except (IndexError, KeyError, AttributeError):
-        try:
-            return infer_value(x, params).numpy().tolist()
-        except Exception:
-            return x
+        value = infer_value(x, params)
+        return value.numpy().tolist()
+    except Exception:  # pylint: disable=broad-except
+        return x
 
 
 def _convert_dtype_value(val):
@@ -842,12 +838,11 @@ def convert_feed(g, op, block):
 def convert_fill_any_like(g, op, block):
     """Operator converter for fill_any_like."""
 
-    out_name = op.output("Out")[0]
-    out_dtype = block.var(out_name).dtype
-    out_dtype = str(out_dtype).strip().split(".")[1]
+    dtype = op.attr("dtype")
+    dtype = _convert_dtype_value(dtype)
     x = g.get_node(op.input("X")[0])
-    value = _expr.const(op.attr("value"))
-    out = _op.transform.full_like(x, value).astype(out_dtype)
+    value = _expr.const(op.attr("value"), dtype=dtype)
+    out = _op.transform.full_like(x, value).astype(dtype)
     g.add_node(op.output("Out")[0], out)
 
 
