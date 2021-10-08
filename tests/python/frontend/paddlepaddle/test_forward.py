@@ -670,10 +670,14 @@ def test_forward_dropout():
     def dropout(inputs):
         return nn.functional.dropout(inputs)
 
+    @paddle.jit.to_static
+    def dropout2(inputs):
+        return nn.functional.dropout(inputs, p=0.2, mode="downscale_in_infer")
+
     input_shape = [1, 3, 10, 10]
     input_data = paddle.rand(input_shape, dtype="float32")
     verify_model(dropout, input_data=input_data[0, 0])
-    verify_model(dropout, input_data=input_data)
+    verify_model(dropout2, input_data=input_data)
 
 
 @tvm.testing.uses_gpu
@@ -1458,9 +1462,7 @@ def test_forward_pool2d():
 
     @paddle.jit.to_static
     def pool2d3(inputs):
-        output = nn.functional.max_pool2d(
-            inputs, kernel_size=2, stride=2, padding=0
-        )
+        output = nn.functional.max_pool2d(inputs, kernel_size=2, stride=2, padding=0)
         return output
 
     @paddle.jit.to_static

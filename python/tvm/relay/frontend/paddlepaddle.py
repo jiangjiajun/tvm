@@ -670,7 +670,14 @@ def convert_dropout(g, op, block):
     """Operator converter for dropout."""
 
     x = g.get_node(op.input("X")[0])
-    g.add_node(op.output("Out")[0], x)
+    mode = op.attr("dropout_implementation")
+    if mode == "downgrade_in_infer":
+        p = op.attr("dropout_prob")
+        p = 1.0 - p
+        out = x * _op.const(p, infer_type(x).checked_type.dtype)
+    else:
+        out = x
+    g.add_node(op.output("Out")[0], out)
 
 
 def convert_elu(g, op, block):
