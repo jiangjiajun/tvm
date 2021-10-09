@@ -362,7 +362,7 @@ def test_forward_cumsum():
 
 @tvm.testing.uses_gpu
 def test_forward_conv():
-    conv2d_input_shape = [1, 3, 10, 10]
+    conv2d_input_shape = [1, 3, 15, 15]
 
     class Conv2D1(nn.Layer):
         def __init__(self, stride=1, padding=0, dilation=1, groups=1, padding_mode="zeros"):
