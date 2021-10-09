@@ -21,7 +21,6 @@ import shutil
 import numpy as np
 
 import paddle
-from paddle.framework import dtype
 import paddle.nn as nn
 
 import tvm
@@ -1462,7 +1461,6 @@ def test_forward_pool2d():
     verify_model(pool2d2, input_data=input_data)
     verify_model(pool2d3, input_data=input_data)
     verify_model(pool2d4, input_data=input_data)
-    verify_model(pool2d3, input_data, input_shape=[[-1, -1, -1, -1]])
 
 
 @tvm.testing.uses_gpu
