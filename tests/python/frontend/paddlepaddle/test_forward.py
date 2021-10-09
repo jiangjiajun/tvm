@@ -382,6 +382,23 @@ def test_forward_conv():
         @paddle.jit.to_static
         def forward(self, inputs):
             return self.softmax(self.conv(inputs))
+    
+    class Conv2D2(nn.Layer):
+        def __init__(self, stride=1, padding=0, dilation=1):
+            super(Conv2D2, self).__init__()
+            self.conv_transpose = nn.Conv2DTranspose(
+                3,
+                6,
+                5,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
+            self.softmax = nn.Softmax()
+
+        @paddle.jit.to_static
+        def forward(self, inputs):
+            return self.softmax(self.conv_transpose(inputs))
 
     input_data = paddle.rand(conv2d_input_shape, dtype="float32")
     verify_model(Conv2D1(), input_data=input_data)
@@ -391,7 +408,8 @@ def test_forward_conv():
         Conv2D1(stride=2, padding=3, dilation=3, padding_mode="replicate"), input_data=input_data
     )
     verify_model(Conv2D1(stride=2, padding="SAME", dilation=2, groups=3), input_data=input_data)
-
+    verify_model(Conv2D2(stride=2, padding="SAME", dilation=2), input_data=input_data)
+    verify_model(Conv2D2(stride=2, padding="VALID", dilation=1), input_data=input_data)
 
 @tvm.testing.uses_gpu
 def test_forward_dot():

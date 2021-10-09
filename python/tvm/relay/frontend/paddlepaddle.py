@@ -600,8 +600,24 @@ def convert_conv2d_transpose(g, op, block):
         paddings = [0, 0]
     elif padding_algorithm == "SAME":
         dilations = [1, 1]
-        input_x = autopad(input_x, strides, [k_h, k_w], dilations)
-        paddings = [0, 0]
+        k_size = [k_h, k_w]
+        input_shape = shape_of(input_x)
+        h_w = _op.strided_slice(input_shape, [2], [4])
+        try:
+            h_w = infer_value(h_w, g.get_params()).numpy().tolist()
+        except Exception as e:
+            msg = "The SAME padding algorithm of Conv_Transpose not support dynamic shape"
+            raise tvm.error.OpAttributeInvalid(msg) from e
+        paddings = []
+        for i in range(2):
+            if strides[i] == 1 or h_w[i] % strides[i] == 0:
+                pad = max(k_size[i] - strides[i], 0)
+            else:
+                pad = max(k_size[i] - (h_w[i] % strides[i]), 0)
+            pad_before = pad // 2
+            pad_after = pad - pad_before
+            paddings.insert(-1, pad_before)
+            paddings.append(pad_after)
     elif padding_algorithm == "EXPLICIT":
         if len(paddings) == 2:
             paddings = [paddings[0], paddings[1], paddings[0], paddings[1]]
@@ -619,7 +635,7 @@ def convert_conv2d_transpose(g, op, block):
         dilation=dilations,
         groups=groups,
         channels=out_channels,
-        kernel_size=[k_h, k_w],
+        kernel_size=k_size,
         output_padding=output_padding,
     )
     g.add_node(op.output("Output")[0], out)
