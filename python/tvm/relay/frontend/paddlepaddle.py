@@ -116,18 +116,54 @@ class ControlFlow:
             graph.add_node(name, _expr.TupleGetItem(loop_vals, i + 1))
 
 
-def _get_pad_size(in_size, dilated_kernel_size, stride_size):
-    """calculate the paddings size"""
+def autopad(
+    data,
+    strides,
+    kernel_shape,
+    dilations,
+    pad_type="constant",
+    pad_value=0.0,
+):
+    """Perform autopadding with dynamic input shapes"""
 
-    if stride_size == 1 or in_size % stride_size == 0:
-        pad = max(dilated_kernel_size - stride_size, 0)
-    else:
-        pad = max(dilated_kernel_size - (in_size % stride_size), 0)
+    # get attributes as constants
+    strides = _op.const(np.array(strides), dtype="int64")
+    dilated_kernel_shape = _op.const(
+        np.array(
+            [(kernel - 1) * dilation + 1 for kernel, dilation in zip(kernel_shape, dilations)]
+        ),
+        dtype="int64",
+    )
+    # get input shape
+    ndim = len(infer_shape(data))
+    shape = _op.strided_slice(shape_of(data, dtype="int64"), [2], [ndim])
 
-    pad_before = pad // 2
-    pad_after = pad - pad_before
+    # set up integer constants
+    zero = _op.const(0, dtype="int64")
+    two = _op.const(2, dtype="int64")
 
-    return [pad_before, pad_after]
+    # Calculate total padding
+    mod = _op.mod(shape, strides)
+
+    left = _op.maximum(dilated_kernel_shape - strides, zero)
+    right = _op.maximum(dilated_kernel_shape - mod, zero)
+
+    total_pad = _op.where(_op.equal(mod, zero), left, right)
+
+    # split total padding into before and after
+    pad_before = _op.floor_divide(total_pad, two)
+    pad_after = total_pad - pad_before
+
+    pad = _op.concatenate(
+        [_op.reshape(pad_before, [-1, 1]), _op.reshape(pad_after, [-1, 1])], axis=1
+    )
+
+    # pad N and C with zeros
+    pad = _op.concatenate([_op.const(np.zeros([2, 2], dtype="int64"), dtype="int64"), pad], axis=0)
+
+    if isinstance(pad_value, (float, int)):
+        pad_value = _op.const(pad_value)
+    return _op.nn.pad(data, fold_constant(pad), pad_value, pad_type)
 
 
 def _dtype_shape_promotion(inputs):
@@ -522,20 +558,9 @@ def convert_conv2d(g, op, block):
     if padding_algorithm == "VALID":
         paddings = [0, 0]
     elif padding_algorithm == "SAME":
-        if strides[0] == 1 and strides[1] == 1:
-            pad_h = _get_pad_size(0, (k_h - 1) * dilations[0] + 1, strides[0])
-            pad_w = _get_pad_size(0, (k_w - 1) * dilations[1] + 1, strides[1])
-        else:
-            input_shape = shape_of(input_x)
-            h_w = _op.strided_slice(input_shape, [2], [4])
-            try:
-                in_h, in_w = infer_value(h_w, g.get_params()).numpy().tolist()
-            except Exception as e:
-                msg = "The SAME padding algorithm of Conv not support dynamic shape"
-                raise tvm.error.OpAttributeInvalid(msg) from e
-            pad_h = _get_pad_size(in_h, (k_h - 1) * dilations[0] + 1, strides[0])
-            pad_w = _get_pad_size(in_w, (k_w - 1) * dilations[1] + 1, strides[1])
-        paddings = [pad_h[0], pad_w[0], pad_h[1], pad_w[1]]
+        dilations = [1, 1]
+        input_x = autopad(input_x, strides, [k_h, k_w], dilations)
+        paddings = [0, 0]
     elif padding_algorithm == "EXPLICIT":
         if len(paddings) == 2:
             paddings = [paddings[0], paddings[1], paddings[0], paddings[1]]
@@ -574,20 +599,9 @@ def convert_conv2d_transpose(g, op, block):
     if padding_algorithm == "VALID":
         paddings = [0, 0]
     elif padding_algorithm == "SAME":
-        if strides[0] == 1 and strides[1] == 1:
-            pad_h = _get_pad_size(0, (k_h - 1) * dilations[0] + 1, strides[0])
-            pad_w = _get_pad_size(0, (k_w - 1) * dilations[1] + 1, strides[1])
-        else:
-            input_shape = shape_of(input_x)
-            h_w = _op.strided_slice(input_shape, [2], [4])
-            try:
-                in_h, in_w = infer_value(h_w, g.get_params()).numpy().tolist()
-            except Exception as e:
-                msg = "The SAME padding algorithm of Conv_Transpose not support dynamic shape"
-                raise tvm.error.OpAttributeInvalid(msg) from e
-            pad_h = _get_pad_size(in_h, (k_h - 1) * dilations[0] + 1, strides[0])
-            pad_w = _get_pad_size(in_w, (k_w - 1) * dilations[1] + 1, strides[1])
-        paddings = [pad_h[0], pad_w[0], pad_h[1], pad_w[1]]
+        dilations = [1, 1]
+        input_x = autopad(input_x, strides, [k_h, k_w], dilations)
+        paddings = [0, 0]
     elif padding_algorithm == "EXPLICIT":
         if len(paddings) == 2:
             paddings = [paddings[0], paddings[1], paddings[0], paddings[1]]
@@ -1427,20 +1441,9 @@ def convert_pool2d(g, op, block):
     if padding_algorithm == "VALID":
         paddings = [0, 0]
     elif padding_algorithm == "SAME":
-        if strides[0] == 1 and strides[1] == 1:
-            pad_h = _get_pad_size(0, ksize[0], strides[0])
-            pad_w = _get_pad_size(0, ksize[1], strides[1])
-        else:
-            input_shape = shape_of(input_x)
-            h_w = _op.strided_slice(input_shape, [2], [4])
-            try:
-                in_h, in_w = infer_value(h_w, g.get_params()).numpy().tolist()
-            except Exception as e:
-                msg = "The SAME padding algorithm of Conv not support dynamic shape"
-                raise tvm.error.OpAttributeInvalid(msg) from e
-            pad_h = _get_pad_size(in_h, ksize[0], strides[0])
-            pad_w = _get_pad_size(in_w, ksize[1], strides[1])
-        paddings = [pad_h[0], pad_w[0], pad_h[1], pad_w[1]]
+        dilations = [1, 1]
+        input_x = autopad(input_x, strides, ksize, dilations)
+        paddings = [0, 0]
     elif padding_algorithm == "EXPLICIT":
         if len(paddings) == 2:
             paddings = [paddings[0], paddings[1], paddings[0], paddings[1]]

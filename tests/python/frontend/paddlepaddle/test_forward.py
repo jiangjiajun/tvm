@@ -14,6 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
 from pathlib import Path
 import shutil
 
@@ -364,28 +365,32 @@ def test_forward_conv():
     conv2d_input_shape = [1, 3, 10, 10]
 
     class Conv2D1(nn.Layer):
-        def __init__(self):
+        def __init__(self, stride=1, padding=0, dilation=1, groups=1, padding_mode="zeros"):
             super(Conv2D1, self).__init__()
-            self.conv = nn.Conv2D(3, 6, 7, bias_attr=True)
+            self.conv = nn.Conv2D(
+                3,
+                6,
+                5,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+                padding_mode=padding_mode,
+            )
             self.softmax = nn.Softmax()
 
         @paddle.jit.to_static
         def forward(self, inputs):
             return self.softmax(self.conv(inputs))
 
-    class Conv2D2(nn.Layer):
-        def __init__(self):
-            super(Conv2D2, self).__init__()
-            self.conv = nn.Conv2D(3, 6, 7, groups=3, bias_attr=False)
-            self.softmax = nn.Softmax()
-
-        @paddle.jit.to_static
-        def forward(self, inputs):
-            return self.softmax(self.conv(inputs))
-
-    conv2d_input_data = paddle.rand(conv2d_input_shape, dtype="float32")
-    verify_model(Conv2D1(), input_data=conv2d_input_data)
-    verify_model(Conv2D2(), input_data=conv2d_input_data)
+    input_data = paddle.rand(conv2d_input_shape, dtype="float32")
+    verify_model(Conv2D1(), input_data=input_data)
+    verify_model(Conv2D1(stride=2, padding="VALID", dilation=3), input_data=input_data)
+    verify_model(Conv2D1(stride=2, padding="SAME", dilation=3), input_data=input_data)
+    verify_model(
+        Conv2D1(stride=2, padding=3, dilation=3, padding_mode="replicate"), input_data=input_data
+    )
+    verify_model(Conv2D1(stride=2, padding="SAME", dilation=2, groups=3), input_data=input_data)
 
 
 @tvm.testing.uses_gpu
