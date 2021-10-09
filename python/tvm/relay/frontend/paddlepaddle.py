@@ -116,18 +116,54 @@ class ControlFlow:
             graph.add_node(name, _expr.TupleGetItem(loop_vals, i + 1))
 
 
-def _get_pad_size(in_size, dilated_kernel_size, stride_size):
-    """calculate the paddings size"""
+def autopad(
+    data,
+    strides,
+    kernel_shape,
+    dilations,
+    pad_type="constant",
+    pad_value=0.0,
+):
+    """Perform padding under SAME mode for dynamic and fixed input shapes."""
 
-    if stride_size == 1 or in_size % stride_size == 0:
-        pad = max(dilated_kernel_size - stride_size, 0)
-    else:
-        pad = max(dilated_kernel_size - (in_size % stride_size), 0)
+    # get attributes as constants
+    strides = _op.const(np.array(strides), dtype="int64")
+    dilated_kernel_shape = _op.const(
+        np.array(
+            [(kernel - 1) * dilation + 1 for kernel, dilation in zip(kernel_shape, dilations)]
+        ),
+        dtype="int64",
+    )
+    # get input shape
+    ndim = len(infer_shape(data))
+    shape = _op.strided_slice(shape_of(data, dtype="int64"), [2], [ndim])
 
-    pad_before = pad // 2
-    pad_after = pad - pad_before
+    # set up integer constants
+    zero = _op.const(0, dtype="int64")
+    two = _op.const(2, dtype="int64")
 
-    return [pad_before, pad_after]
+    # Calculate total padding
+    mod = _op.mod(shape, strides)
+
+    left = _op.maximum(dilated_kernel_shape - strides, zero)
+    right = _op.maximum(dilated_kernel_shape - mod, zero)
+
+    total_pad = _op.where(_op.equal(mod, zero), left, right)
+
+    # split total padding into before and after
+    pad_before = _op.floor_divide(total_pad, two)
+    pad_after = total_pad - pad_before
+
+    pad = _op.concatenate(
+        [_op.reshape(pad_before, [-1, 1]), _op.reshape(pad_after, [-1, 1])], axis=1
+    )
+
+    # pad N and C with zeros
+    pad = _op.concatenate([_op.const(np.zeros([2, 2], dtype="int64"), dtype="int64"), pad], axis=0)
+
+    if isinstance(pad_value, (float, int)):
+        pad_value = _op.const(pad_value)
+    return _op.nn.pad(data, fold_constant(pad), pad_value, pad_type)
 
 
 def _dtype_shape_promotion(inputs):
@@ -522,20 +558,9 @@ def convert_conv2d(g, op, block):
     if padding_algorithm == "VALID":
         paddings = [0, 0]
     elif padding_algorithm == "SAME":
-        if strides[0] == 1 and strides[1] == 1:
-            pad_h = _get_pad_size(0, (k_h - 1) * dilations[0] + 1, strides[0])
-            pad_w = _get_pad_size(0, (k_w - 1) * dilations[1] + 1, strides[1])
-        else:
-            input_shape = shape_of(input_x)
-            h_w = _op.strided_slice(input_shape, [2], [4])
-            try:
-                in_h, in_w = infer_value(h_w, g.get_params()).numpy().tolist()
-            except Exception as e:
-                msg = "The SAME padding algorithm of Conv not support dynamic shape"
-                raise tvm.error.OpAttributeInvalid(msg) from e
-            pad_h = _get_pad_size(in_h, (k_h - 1) * dilations[0] + 1, strides[0])
-            pad_w = _get_pad_size(in_w, (k_w - 1) * dilations[1] + 1, strides[1])
-        paddings = [pad_h[0], pad_w[0], pad_h[1], pad_w[1]]
+        dilations = [1, 1]
+        input_x = autopad(input_x, strides, [k_h, k_w], dilations)
+        paddings = [0, 0]
     elif padding_algorithm == "EXPLICIT":
         if len(paddings) == 2:
             paddings = [paddings[0], paddings[1], paddings[0], paddings[1]]
@@ -571,23 +596,28 @@ def convert_conv2d_transpose(g, op, block):
     kernel = g.get_node(op.input("Filter")[0])
     input_x = g.get_node(op.input("Input")[0])
     _, out_channels, k_h, k_w = infer_shape(kernel)
+    k_size = [k_h, k_w]
     if padding_algorithm == "VALID":
         paddings = [0, 0]
     elif padding_algorithm == "SAME":
-        if strides[0] == 1 and strides[1] == 1:
-            pad_h = _get_pad_size(0, (k_h - 1) * dilations[0] + 1, strides[0])
-            pad_w = _get_pad_size(0, (k_w - 1) * dilations[1] + 1, strides[1])
-        else:
-            input_shape = shape_of(input_x)
-            h_w = _op.strided_slice(input_shape, [2], [4])
-            try:
-                in_h, in_w = infer_value(h_w, g.get_params()).numpy().tolist()
-            except Exception as e:
-                msg = "The SAME padding algorithm of Conv_Transpose not support dynamic shape"
-                raise tvm.error.OpAttributeInvalid(msg) from e
-            pad_h = _get_pad_size(in_h, (k_h - 1) * dilations[0] + 1, strides[0])
-            pad_w = _get_pad_size(in_w, (k_w - 1) * dilations[1] + 1, strides[1])
-        paddings = [pad_h[0], pad_w[0], pad_h[1], pad_w[1]]
+        dilations = [1, 1]
+        input_shape = shape_of(input_x)
+        h_w = _op.strided_slice(input_shape, [2], [4])
+        try:
+            h_w = infer_value(h_w, g.get_params()).numpy().tolist()
+        except Exception as e:
+            msg = "The SAME padding algorithm of Conv_Transpose not support dynamic shape"
+            raise tvm.error.OpAttributeInvalid(msg) from e
+        paddings = []
+        for i in range(2):
+            if strides[i] == 1 or h_w[i] % strides[i] == 0:
+                pad = max(k_size[i] - strides[i], 0)
+            else:
+                pad = max(k_size[i] - (h_w[i] % strides[i]), 0)
+            pad_before = pad // 2
+            pad_after = pad - pad_before
+            paddings.insert(-1, pad_before)
+            paddings.append(pad_after)
     elif padding_algorithm == "EXPLICIT":
         if len(paddings) == 2:
             paddings = [paddings[0], paddings[1], paddings[0], paddings[1]]
@@ -605,7 +635,7 @@ def convert_conv2d_transpose(g, op, block):
         dilation=dilations,
         groups=groups,
         channels=out_channels,
-        kernel_size=[k_h, k_w],
+        kernel_size=k_size,
         output_padding=output_padding,
     )
     g.add_node(op.output("Output")[0], out)
@@ -1403,6 +1433,7 @@ def convert_pool2d(g, op, block):
     paddings = op.attr("paddings")
     padding_algorithm = op.attr("padding_algorithm")
     pooling_type = op.attr("pooling_type")
+
     if global_pooling:
         adaptive = True
         ksize = [1, 1]
@@ -1414,6 +1445,7 @@ def convert_pool2d(g, op, block):
         "avg": "avg_pool2d",
         "max": "max_pool2d",
     }
+
     strides = op.attr("strides")
     if isinstance(strides, int):
         strides = [strides, strides]
@@ -1425,20 +1457,9 @@ def convert_pool2d(g, op, block):
     if padding_algorithm == "VALID":
         paddings = [0, 0]
     elif padding_algorithm == "SAME":
-        if strides[0] == 1 and strides[1] == 1:
-            pad_h = _get_pad_size(0, ksize[0], strides[0])
-            pad_w = _get_pad_size(0, ksize[1], strides[1])
-        else:
-            input_shape = shape_of(input_x)
-            h_w = _op.strided_slice(input_shape, [2], [4])
-            try:
-                in_h, in_w = infer_value(h_w, g.get_params()).numpy().tolist()
-            except Exception as e:
-                msg = "The SAME padding algorithm of Conv not support dynamic shape"
-                raise tvm.error.OpAttributeInvalid(msg) from e
-            pad_h = _get_pad_size(in_h, ksize[0], strides[0])
-            pad_w = _get_pad_size(in_w, ksize[1], strides[1])
-        paddings = [pad_h[0], pad_w[0], pad_h[1], pad_w[1]]
+        dilations = [1, 1]
+        input_x = autopad(input_x, strides, ksize, dilations)
+        paddings = [0, 0]
     elif padding_algorithm == "EXPLICIT":
         if len(paddings) == 2:
             paddings = [paddings[0], paddings[1], paddings[0], paddings[1]]
@@ -1454,9 +1475,20 @@ def convert_pool2d(g, op, block):
         ksize[1] = in_w
 
     if not adaptive:
-        out = getattr(_op.nn, op_map[pooling_type])(
-            input_x, pool_size=ksize, strides=strides, padding=paddings, ceil_mode=ceil_mode
-        )
+        if pooling_type == "avg":
+            exclusive = op.attr("exclusive")
+            out = _op.nn.avg_pool2d(
+                input_x,
+                pool_size=ksize,
+                strides=strides,
+                padding=paddings,
+                ceil_mode=ceil_mode,
+                count_include_pad=not exclusive,
+            )
+        else:
+            out = getattr(_op.nn, op_map[pooling_type])(
+                input_x, pool_size=ksize, strides=strides, padding=paddings, ceil_mode=ceil_mode
+            )
     else:
         out = getattr(_op.nn, "adaptive_" + op_map[pooling_type])(input_x, output_size=ksize)
     g.add_node(op.output("Out")[0], out)

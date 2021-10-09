@@ -14,6 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
 from pathlib import Path
 import shutil
 
@@ -361,32 +362,54 @@ def test_forward_cumsum():
 
 @tvm.testing.uses_gpu
 def test_forward_conv():
-    conv2d_input_shape = [1, 3, 10, 10]
+    conv2d_input_shape = [1, 3, 15, 15]
 
     class Conv2D1(nn.Layer):
-        def __init__(self):
+        def __init__(self, stride=1, padding=0, dilation=1, groups=1, padding_mode="zeros"):
             super(Conv2D1, self).__init__()
-            self.conv = nn.Conv2D(3, 6, 7, bias_attr=True)
+            self.conv = nn.Conv2D(
+                3,
+                6,
+                5,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=groups,
+                padding_mode=padding_mode,
+            )
             self.softmax = nn.Softmax()
 
         @paddle.jit.to_static
         def forward(self, inputs):
             return self.softmax(self.conv(inputs))
-
+    
     class Conv2D2(nn.Layer):
-        def __init__(self):
+        def __init__(self, stride=1, padding=0, dilation=1):
             super(Conv2D2, self).__init__()
-            self.conv = nn.Conv2D(3, 6, 7, groups=3, bias_attr=False)
+            self.conv_transpose = nn.Conv2DTranspose(
+                3,
+                6,
+                5,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+            )
             self.softmax = nn.Softmax()
 
         @paddle.jit.to_static
         def forward(self, inputs):
-            return self.softmax(self.conv(inputs))
+            return self.softmax(self.conv_transpose(inputs))
 
-    conv2d_input_data = paddle.rand(conv2d_input_shape, dtype="float32")
-    verify_model(Conv2D1(), input_data=conv2d_input_data)
-    verify_model(Conv2D2(), input_data=conv2d_input_data)
-
+    input_data = paddle.rand(conv2d_input_shape, dtype="float32")
+    verify_model(Conv2D1(), input_data=input_data)
+    verify_model(Conv2D1(stride=2, padding="VALID", dilation=3), input_data=input_data)
+    verify_model(Conv2D1(stride=2, padding="SAME", dilation=3), input_data=input_data)
+    verify_model(
+        Conv2D1(stride=2, padding=3, dilation=3, padding_mode="replicate"), input_data=input_data
+    )
+    verify_model(Conv2D1(stride=2, padding="SAME", dilation=2, groups=3), input_data=input_data)
+    verify_model(Conv2D2(stride=2, padding="SAME", dilation=2), input_data=input_data)
+    verify_model(Conv2D2(stride=2, padding="VALID", dilation=1), input_data=input_data)
 
 @tvm.testing.uses_gpu
 def test_forward_dot():
@@ -703,12 +726,19 @@ def test_forward_pool2d():
     def pool2d3(inputs):
         return nn.functional.max_pool2d(
             inputs, kernel_size=2, stride=2, padding=0, return_mask=True
+        )[0]
+
+    @paddle.jit.to_static
+    def pool2d4(inputs):
+        return nn.functional.avg_pool2d(
+            inputs, kernel_size=3, stride=1, padding=[1, 1], exclusive=False, divisor_override=2.5
         )
 
     input_data = paddle.uniform(shape=[1, 2, 32, 32], dtype="float32", min=-1, max=1)
     verify_model(pool2d1, input_data=input_data)
     verify_model(pool2d2, input_data=input_data)
-    # verify_model(pool2d3, input_data=input_data)
+    verify_model(pool2d3, input_data=input_data)
+    verify_model(pool2d4, input_data=input_data)
 
 
 @tvm.testing.uses_gpu
