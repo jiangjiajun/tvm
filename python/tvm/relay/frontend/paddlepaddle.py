@@ -124,7 +124,7 @@ def autopad(
     pad_type="constant",
     pad_value=0.0,
 ):
-    """Perform autopadding with dynamic input shapes"""
+    """Perform padding under SAME mode for dynamic and fixed input shapes."""
 
     # get attributes as constants
     strides = _op.const(np.array(strides), dtype="int64")
