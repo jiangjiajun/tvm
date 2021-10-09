@@ -596,11 +596,11 @@ def convert_conv2d_transpose(g, op, block):
     kernel = g.get_node(op.input("Filter")[0])
     input_x = g.get_node(op.input("Input")[0])
     _, out_channels, k_h, k_w = infer_shape(kernel)
+    k_size = [k_h, k_w]
     if padding_algorithm == "VALID":
         paddings = [0, 0]
     elif padding_algorithm == "SAME":
         dilations = [1, 1]
-        k_size = [k_h, k_w]
         input_shape = shape_of(input_x)
         h_w = _op.strided_slice(input_shape, [2], [4])
         try:
