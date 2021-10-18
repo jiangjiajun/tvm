@@ -1325,35 +1325,38 @@ def convert_multiclass_nms(g, op, block):
         score_threshold=score_threshold)
     num_total_boxes = _op.cast(num_total_boxes, dtype='int32')
 
-    num_indices, _ = infer_shape(indices)
-    if nms_top_k > 0 and nms_top_k * num_classes < num_indices:
-        indices = _op.strided_slice(
-            indices,
-            begin=[0, 0],
-            end=[batch_size * nms_top_k * num_classes, 3])
-        num_indices = nms_top_k * num_classes
+#    num_indices, _ = infer_shape(indices)
+#    if nms_top_k > 0 and nms_top_k * num_classes < num_indices:
+#        indices = _op.strided_slice(
+#            indices,
+#            begin=[0, 0],
+#            end=[batch_size * nms_top_k * num_classes, 3])
+#        num_indices = nms_top_k * num_classes
 
-    filters = np.array([i for i in range(num_indices)]).astype('int32')
-    filters = filters.reshape((-1, 1))
-    filters = _expr.const(filters)
-    compare = _op.less(filters, num_total_boxes)
-    indices = indices * compare.astype('int64')
+
+    slice_end = _op.concatenate([num_total_boxes, _expr.const([1], dtype='int64')], axis=0)
+    indices = _op.strided_slice(indices, begin=[0, 0], end=slice_end)
+#    filters = np.array([i for i in range(num_indices)]).astype('int32')
+#    filters = filters.reshape((-1, 1))
+#    filters = _expr.const(filters)
+#    compare = _op.less(filters, num_total_boxes)
+#    indices = indices * compare.astype('int64')
 
     batch_boxid = _op.strided_slice(indices,
                                     begin=[0, 0],
-                                    end=[num_indices, 3],
+                                    end=[10000000, 3],
                                     strides=[1, 2])
-    class_id = _op.strided_slice(indices, begin=[0, 1], end=[num_indices, 2])
+    class_id = _op.strided_slice(indices, begin=[0, 1], end=[10000000, 2])
     batch_boxid = _op.transpose(batch_boxid, axes=[1, 0])
 
     filter_boxes = _op.gather_nd(boxes, batch_boxid, 0)
     new_indices = _op.transpose(indices, axes=[1, 0])
     filter_scores = _op.gather_nd(scores, new_indices, 0)
 
-    compare = _op.reshape(compare, (-1, ))
-    filter_scores = filter_scores * compare.astype('float32')
+#    compare = _op.reshape(compare, (-1, ))
+#    filter_scores = filter_scores * compare.astype('float32')
 
-    if keep_top_k > 0 and keep_top_k < num_indices:
+    if keep_top_k > 0:
         filter_scores, topk_idx = _op.topk(filter_scores,
                                            k=keep_top_k,
                                            ret_type='both',
@@ -2384,6 +2387,10 @@ class GraphProto:
                 if op.type == "fetch":
                     output_names.append(op.input("X")[0])
 
+        if "translated_layer/scale_1.tmp_0" in output_names:
+            idx = output_names.index("translated_layer/scale_1.tmp_0")
+            del output_names[idx]
+
         outputs = [self.get_node(name) for name in output_names]
         outputs = outputs[0] if len(outputs) == 1 else _expr.Tuple(outputs)
 
@@ -2410,7 +2417,12 @@ class GraphProto:
 
         output_names = [x.name for x in layer._output_spec()]
 
+        if "translated_layer/scale_1.tmp_0" in output_names:
+            idx = output_names.index("translated_layer/scale_1.tmp_0")
+            del output_names[idx]
+
         outputs = [self.get_node(name) for name in output_names]
+        
         outputs = outputs[0] if len(outputs) == 1 else _expr.Tuple(outputs)
 
         free_vars = analysis.free_vars(outputs)
