@@ -1693,6 +1693,7 @@ def convert_reshape(g, op, block):
     data = g.get_node(op.input("X")[0])
     if input_shape:
         new_shape = g.get_node(input_shape[0])
+        new_shape = _infer_value(new_shape, g.get_params())
     elif input_shape_tensor:
         new_shape = []
         for shape_name in input_shape_tensor:
