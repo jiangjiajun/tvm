@@ -1371,8 +1371,7 @@ def convert_multiclass_nms(g, op, block):
     class_id = _op.cast(class_id, dtype='float32')
     out = _op.concatenate([class_id, filter_scores, filter_boxes], axis=1)
     g.add_node(op.output('Out')[0], out)
-    print("============", op.output('NmsRoisNum')[0])
-#    g.add_node(op.output('NmsRoisNum')[0], num_total_boxes)
+    g.add_node(op.output('NmsRoisNum')[0], num_total_boxes)
 
 
 def convert_numel(g, op, block):
@@ -1739,9 +1738,6 @@ def convert_scale(g, op, block):
     scale = op.attr("scale")
     bias = op.attr("bias")
     bias_after_scale = op.attr("bias_after_scale")
-    if op.input("X")[0] == "multiclass_nms3_0.tmp_2":
-        return
-
     x = g.get_node(op.input("X")[0])
     if np.isclose(scale, 1.0) and np.isclose(bias, 0.0):
         out = x
