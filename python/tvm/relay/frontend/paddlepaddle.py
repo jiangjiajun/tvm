@@ -190,11 +190,12 @@ def _dtype_shape_promotion(inputs):
 def shape_of(x, dtype="int32"):
     """Get shape of a tensor"""
 
-    ttype = infer_type(x).checked_type
-    if not _ty.is_dynamic(ttype):
-        shape = list(ttype.shape)
+    try:
+        shape = infer_shape(x)
+        shape = [int(i) for i in shape]
         return _expr.const(np.array(shape), dtype)
-    return _op.shape_of(x, dtype)
+    except:
+        return _op.shape_of(x, dtype)
 
 
 def _infer_value(x, params):
@@ -549,7 +550,10 @@ def convert_conv2d(g, op, block):
     dilations = op.attr("dilations")
     groups = op.attr("groups")
     paddings = op.attr("paddings")
-    padding_algorithm = op.attr("padding_algorithm")
+    if op.has_attr("padding_algorithm"):
+        padding_algorithm = op.attr("padding_algorithm")
+    else:
+        padding_algorithm = "EXPLICIT"
     strides = op.attr("strides")
 
     kernel = g.get_node(op.input("Filter")[0])
@@ -1354,8 +1358,8 @@ def convert_mul(g, op, block):
     y = g.get_node(op.input("Y")[0])
     x_num_col_dims = op.attr("x_num_col_dims")
     y_num_col_dims = op.attr("y_num_col_dims")
-    x_shape = _op.shape_of(x)
-    y_shape = _op.shape_of(y)
+    x_shape = shape_of(x)
+    y_shape = shape_of(y)
     x_dim = infer_shape(x_shape)[0]
     y_dim = infer_shape(y_shape)[0]
     if x_num_col_dims < 0:
@@ -1388,6 +1392,7 @@ def convert_mul(g, op, block):
     out_post_shape = _op.strided_slice(y_shape, [y_num_col_dims], [y_dim], [1])
     out_shape = _op.concatenate([out_pre_shape, out_post_shape], axis=0)
     out_shape = fold_constant(out_shape)
+    out_shape = _infer_value(out_shape, g.get_params())
     out = _op.reshape(out, out_shape)
     g.add_node(op.output("Out")[0], out)
 
@@ -1431,7 +1436,10 @@ def convert_pool2d(g, op, block):
     global_pooling = op.attr("global_pooling")
     ksize = op.attr("ksize")
     paddings = op.attr("paddings")
-    padding_algorithm = op.attr("padding_algorithm")
+    if op.has_attr("padding_algorithm"):
+        padding_algorithm = op.attr("padding_algorithm")
+    else:
+        padding_algorithm = "EXPLICIT"
     pooling_type = op.attr("pooling_type")
 
     if global_pooling:
@@ -2095,10 +2103,10 @@ def convert_slice(g, op, block):
     if isinstance(decrease_axis, int):
         decrease_axis = [decrease_axis]
 
-    if op.input("StartsTensor"):
+    if "StartsTensor" in op.input_names and op.input("StartsTensor"):
         starts = g.get_node(op.input("StartsTensor")[0])
         starts = _infer_value(starts, g.get_params())
-    elif op.input("StartsTensorList"):
+    elif "StartsTensorList" in op.input_names and op.input("StartsTensorList"):
         starts = []
         for start_index in op.input("StartsTensorList"):
             start_index = g.get_node(start_index).astype("int64")
@@ -2122,10 +2130,10 @@ def convert_slice(g, op, block):
                 base[axis] = starts[i]
             starts = base
 
-    if op.input("EndsTensor"):
+    if "EndsTensor" in op.input_names and op.input("EndsTensor"):
         ends = g.get_node(op.input("EndsTensor")[0])
         ends = _infer_value(ends, g.get_params())
-    elif op.input("EndsTensorList"):
+    elif "EndsTensorList" in op.input_names and op.input("EndsTensorList"):
         ends = []
         for end_index in op.input("EndsTensorList"):
             end_index = g.get_node(end_index).astype("int64")
@@ -2194,7 +2202,10 @@ def convert_slice(g, op, block):
 def convert_softmax(g, op, block):
     """Operator converter for softmax."""
 
-    axis = op.attr("axis")
+    if op.has_attr("axis"):
+        axis = op.attr("axis")
+    else:
+        axis = -1
     input_shape = block.var(op.input("X")[0]).shape
     if axis < 0:
         axis = len(input_shape) + axis
