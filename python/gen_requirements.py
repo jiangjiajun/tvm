@@ -146,6 +146,7 @@ REQUIREMENTS_BY_PIECE: RequirementsByPieceType = [
                 "future",  # Hidden dependency of torch.
                 "onnx",
                 "onnxruntime",
+                "paddlepaddle",
                 "tensorflow",
                 "tflite",
                 "torch",
@@ -197,6 +198,7 @@ REQUIREMENTS_BY_PIECE: RequirementsByPieceType = [
                 "sphinx_autodoc_annotation",
                 "sphinx_gallery",
                 "sphinx_rtd_theme",
+                "types-psutil",
             ],
         ),
     ),
