@@ -124,7 +124,7 @@ def convert_addmm(g, op, block):
     alpha = op.attr("Alpha")
     beta = op.attr("Beta")
     dtype = block.var(op.output("Out")[0]).dtype
-    dtype = convert_dtype_value(dtype)
+    dtype = _convert_dtype_value(dtype)
 
     if not isinstance(alpha, _expr.Expr) and alpha != 1:
         alpha = _expr.const(alpha, dtype)
